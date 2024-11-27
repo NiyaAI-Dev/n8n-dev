@@ -1,49 +1,40 @@
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useLocalStorage } from '@vueuse/core';
-import { useSettingsStore } from '@/stores/settings.store';
 import { useTelemetry } from '@/composables/useTelemetry';
 import { useWorkflowsStore } from '@/stores/workflows.store';
-import { debouncedRef } from '@vueuse/core';
+import { useNDVStore } from '@/stores/ndv.store';
 
 export function useNodeViewVersionSwitcher() {
+	const ndvStore = useNDVStore();
 	const workflowsStore = useWorkflowsStore();
-	const settingsStore = useSettingsStore();
 	const telemetry = useTelemetry();
 
 	const isNewUser = computed(() => workflowsStore.activeWorkflows.length === 0);
 
-	const nodeViewVersion = useLocalStorage(
-		'NodeView.version',
-		settingsStore.deploymentType === 'n8n-internal' ? '2' : '1',
-	);
+	const nodeViewVersion = useLocalStorage('NodeView.version', '2');
+	const nodeViewVersionMigrated = useLocalStorage('NodeView.migrated', false);
 
-	const nodeViewSwitcherDropdownOpened = ref(false);
-	function setNodeViewSwitcherDropdownOpened() {
-		nodeViewSwitcherDropdownOpened.value = true;
+	function setNodeViewSwitcherDropdownOpened(visible: boolean) {
+		if (!visible) {
+			setNodeViewSwitcherDiscovered();
+		}
 	}
 
-	const nodeViewSwitcherDiscovered = useLocalStorage('NodeView.switcher.discovered', false);
+	const nodeViewSwitcherDiscovered = useLocalStorage('NodeView.switcher.discovered.beta', false);
 	function setNodeViewSwitcherDiscovered() {
 		nodeViewSwitcherDiscovered.value = true;
 	}
 
-	const isNodeViewDiscoveryTooltipVisibleRaw = computed(
+	const isNodeViewDiscoveryTooltipVisible = computed(
 		() =>
-			nodeViewVersion.value !== '2' &&
-			!(
-				isNewUser.value ||
-				nodeViewSwitcherDropdownOpened.value ||
-				nodeViewSwitcherDiscovered.value
-			),
-	);
-
-	const isNodeViewDiscoveryTooltipVisible = debouncedRef(
-		isNodeViewDiscoveryTooltipVisibleRaw,
-		3000,
+			!isNewUser.value &&
+			!ndvStore.activeNodeName &&
+			nodeViewVersion.value === '2' &&
+			!nodeViewSwitcherDiscovered.value,
 	);
 
 	function switchNodeViewVersion() {
-		const toVersion = nodeViewVersion.value === '1' ? '2' : '1';
+		const toVersion = nodeViewVersion.value === '2' ? '1' : '2';
 
 		telemetry.track('User switched canvas version', {
 			to_version: toVersion,
@@ -52,12 +43,24 @@ export function useNodeViewVersionSwitcher() {
 		nodeViewVersion.value = toVersion;
 	}
 
+	function migrateToNewNodeViewVersion() {
+		if (nodeViewVersionMigrated.value || nodeViewVersion.value === '2') {
+			return;
+		}
+
+		switchNodeViewVersion();
+		nodeViewVersionMigrated.value = true;
+	}
+
 	return {
+		isNewUser,
 		nodeViewVersion,
+		nodeViewVersionMigrated,
 		nodeViewSwitcherDiscovered,
 		isNodeViewDiscoveryTooltipVisible,
 		setNodeViewSwitcherDropdownOpened,
 		setNodeViewSwitcherDiscovered,
 		switchNodeViewVersion,
+		migrateToNewNodeViewVersion,
 	};
 }
