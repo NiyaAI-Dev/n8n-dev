@@ -1,7 +1,7 @@
+import { Container } from '@n8n/di';
 import { response as Response } from 'express';
 import nock from 'nock';
 import { parse as parseQs } from 'querystring';
-import { Container } from 'typedi';
 
 import { OAuth2CredentialController } from '@/controllers/oauth/oauth2-credential.controller';
 import { CredentialsHelper } from '@/credentials-helper';
@@ -28,7 +28,7 @@ describe('OAuth2 API', () => {
 		authQueryParameters: 'access_type=offline',
 	};
 
-	CredentialsHelper.prototype.applyDefaultsAndOverwrites = (_, decryptedDataOriginal) =>
+	CredentialsHelper.prototype.applyDefaultsAndOverwrites = async (_, decryptedDataOriginal) =>
 		decryptedDataOriginal;
 
 	beforeAll(async () => {

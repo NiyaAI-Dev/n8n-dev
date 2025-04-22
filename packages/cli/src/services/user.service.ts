@@ -1,17 +1,21 @@
+import type { RoleChangeRequestDto } from '@n8n/api-types';
+import { Service } from '@n8n/di';
+import type { AssignableRole } from '@n8n/permissions';
+import { Logger } from 'n8n-core';
 import type { IUserSettings } from 'n8n-workflow';
-import { ApplicationError, ErrorReporterProxy as ErrorReporter } from 'n8n-workflow';
-import { Service } from 'typedi';
+import { UnexpectedError } from 'n8n-workflow';
 
-import type { User, AssignableRole } from '@/databases/entities/user';
+import { User } from '@/databases/entities/user';
 import { UserRepository } from '@/databases/repositories/user.repository';
 import { InternalServerError } from '@/errors/response-errors/internal-server.error';
 import { EventService } from '@/events/event.service';
 import type { Invitation, PublicUser } from '@/interfaces';
-import { Logger } from '@/logging/logger.service';
 import type { PostHogClient } from '@/posthog';
 import type { UserRequest } from '@/requests';
 import { UrlService } from '@/services/url.service';
 import { UserManagementMailer } from '@/user-management/email';
+
+import { PublicApiKeyService } from './public-api-key.service';
 
 @Service()
 export class UserService {
@@ -21,6 +25,7 @@ export class UserService {
 		private readonly mailer: UserManagementMailer,
 		private readonly urlService: UrlService,
 		private readonly eventService: EventService,
+		private readonly publicApiKeyService: PublicApiKeyService,
 	) {}
 
 	async update(userId: string, data: Partial<User>) {
@@ -68,7 +73,7 @@ export class UserService {
 		};
 
 		if (options?.withInviteUrl && !options?.inviterId) {
-			throw new ApplicationError('Inviter ID is required to generate invite URL');
+			throw new UnexpectedError('Inviter ID is required to generate invite URL');
 		}
 
 		if (options?.withInviteUrl && options?.inviterId && publicUser.isPending) {
@@ -213,9 +218,8 @@ export class UserService {
 					),
 			);
 		} catch (error) {
-			ErrorReporter.error(error);
 			this.logger.error('Failed to create user shells', { userShells: createdUsers });
-			throw new InternalServerError('An error occurred during user creation');
+			throw new InternalServerError('An error occurred during user creation', error);
 		}
 
 		pendingUsersToInvite.forEach(({ email, id }) => createdUsers.set(email, id));
@@ -227,5 +231,20 @@ export class UserService {
 		);
 
 		return { usersInvited, usersCreated: toCreateUsers.map(({ email }) => email) };
+	}
+
+	async changeUserRole(user: User, targetUser: User, newRole: RoleChangeRequestDto) {
+		return await this.userRepository.manager.transaction(async (trx) => {
+			await trx.update(User, { id: targetUser.id }, { role: newRole.newRoleName });
+
+			const adminDowngradedToMember =
+				user.role === 'global:owner' &&
+				targetUser.role === 'global:admin' &&
+				newRole.newRoleName === 'global:member';
+
+			if (adminDowngradedToMember) {
+				await this.publicApiKeyService.removeOwnerOnlyScopesFromApiKeys(targetUser, trx);
+			}
+		});
 	}
 }

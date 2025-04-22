@@ -1,4 +1,4 @@
-import { hasScope, type ScopeOptions, type Scope } from '@n8n/permissions';
+import { hasScope, type ScopeOptions, type Scope, GlobalRole } from '@n8n/permissions';
 import {
 	AfterLoad,
 	AfterUpdate,
@@ -18,7 +18,7 @@ import {
 	GLOBAL_OWNER_SCOPES,
 	GLOBAL_MEMBER_SCOPES,
 	GLOBAL_ADMIN_SCOPES,
-} from '@/permissions/global-roles';
+} from '@/permissions.ee/global-roles';
 import { NoUrl } from '@/validators/no-url.validator';
 import { NoXss } from '@/validators/no-xss.validator';
 
@@ -29,9 +29,6 @@ import type { ProjectRelation } from './project-relation';
 import type { SharedCredentials } from './shared-credentials';
 import type { SharedWorkflow } from './shared-workflow';
 import { objectRetriever, lowerCaser } from '../utils/transformers';
-
-export type GlobalRole = 'global:owner' | 'global:admin' | 'global:member';
-export type AssignableRole = Exclude<GlobalRole, 'global:owner'>;
 
 const STATIC_SCOPE_MAP: Record<GlobalRole, Scope[]> = {
 	'global:owner': GLOBAL_OWNER_SCOPES,
@@ -84,7 +81,7 @@ export class User extends WithTimestamps implements IUser {
 	})
 	settings: IUserSettings | null;
 
-	@Column()
+	@Column({ type: String })
 	role: GlobalRole;
 
 	@OneToMany('AuthIdentity', 'user')

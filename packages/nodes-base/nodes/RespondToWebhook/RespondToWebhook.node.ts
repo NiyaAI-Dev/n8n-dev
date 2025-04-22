@@ -1,10 +1,12 @@
-import type { Readable } from 'stream';
+import jwt from 'jsonwebtoken';
+import set from 'lodash/set';
 import type {
 	IDataObject,
 	IExecuteFunctions,
 	IN8nHttpFullResponse,
 	IN8nHttpResponse,
 	INodeExecutionData,
+	INodeProperties,
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
@@ -12,15 +14,65 @@ import {
 	jsonParse,
 	BINARY_ENCODING,
 	NodeOperationError,
-	NodeConnectionType,
+	NodeConnectionTypes,
 	WEBHOOK_NODE_TYPE,
 	FORM_TRIGGER_NODE_TYPE,
 	CHAT_TRIGGER_NODE_TYPE,
 	WAIT_NODE_TYPE,
 } from 'n8n-workflow';
-import set from 'lodash/set';
-import jwt from 'jsonwebtoken';
+import type { Readable } from 'stream';
+
 import { formatPrivateKey, generatePairedItemData } from '../../utils/utilities';
+
+const respondWithProperty: INodeProperties = {
+	displayName: 'Respond With',
+	name: 'respondWith',
+	type: 'options',
+	options: [
+		{
+			name: 'All Incoming Items',
+			value: 'allIncomingItems',
+			description: 'Respond with all input JSON items',
+		},
+		{
+			name: 'Binary File',
+			value: 'binary',
+			description: 'Respond with incoming file binary data',
+		},
+		{
+			name: 'First Incoming Item',
+			value: 'firstIncomingItem',
+			description: 'Respond with the first input JSON item',
+		},
+		{
+			name: 'JSON',
+			value: 'json',
+			description: 'Respond with a custom JSON body',
+		},
+		{
+			name: 'JWT Token',
+			value: 'jwt',
+			description: 'Respond with a JWT token',
+		},
+		{
+			name: 'No Data',
+			value: 'noData',
+			description: 'Respond with an empty body',
+		},
+		{
+			name: 'Redirect',
+			value: 'redirect',
+			description: 'Respond with a redirect to a given URL',
+		},
+		{
+			name: 'Text',
+			value: 'text',
+			description: 'Respond with a simple text message body',
+		},
+	],
+	default: 'firstIncomingItem',
+	description: 'The data that should be returned',
+};
 
 export class RespondToWebhook implements INodeType {
 	description: INodeTypeDescription = {
@@ -28,13 +80,13 @@ export class RespondToWebhook implements INodeType {
 		icon: { light: 'file:webhook.svg', dark: 'file:webhook.dark.svg' },
 		name: 'respondToWebhook',
 		group: ['transform'],
-		version: [1, 1.1],
+		version: [1, 1.1, 1.2],
 		description: 'Returns data for Webhook',
 		defaults: {
 			name: 'Respond to Webhook',
 		},
-		inputs: [NodeConnectionType.Main],
-		outputs: [NodeConnectionType.Main],
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
 				name: 'jwtAuth',
@@ -55,53 +107,13 @@ export class RespondToWebhook implements INodeType {
 				default: '',
 			},
 			{
-				displayName: 'Respond With',
-				name: 'respondWith',
-				type: 'options',
-				options: [
-					{
-						name: 'All Incoming Items',
-						value: 'allIncomingItems',
-						description: 'Respond with all input JSON items',
-					},
-					{
-						name: 'Binary File',
-						value: 'binary',
-						description: 'Respond with incoming file binary data',
-					},
-					{
-						name: 'First Incoming Item',
-						value: 'firstIncomingItem',
-						description: 'Respond with the first input JSON item',
-					},
-					{
-						name: 'JSON',
-						value: 'json',
-						description: 'Respond with a custom JSON body',
-					},
-					{
-						name: 'JWT Token',
-						value: 'jwt',
-						description: 'Respond with a JWT token',
-					},
-					{
-						name: 'No Data',
-						value: 'noData',
-						description: 'Respond with an empty body',
-					},
-					{
-						name: 'Redirect',
-						value: 'redirect',
-						description: 'Respond with a redirect to a given URL',
-					},
-					{
-						name: 'Text',
-						value: 'text',
-						description: 'Respond with a simple text message body',
-					},
-				],
-				default: 'firstIncomingItem',
-				description: 'The data that should be returned',
+				...respondWithProperty,
+				displayOptions: { show: { '@version': [1, 1.1] } },
+			},
+			{
+				...respondWithProperty,
+				noDataExpression: true,
+				displayOptions: { show: { '@version': [{ _cnd: { gte: 1.2 } }] } },
 			},
 			{
 				displayName: 'Credentials',
@@ -355,14 +367,12 @@ export class RespondToWebhook implements INodeType {
 				}
 			} else if (respondWith === 'jwt') {
 				try {
-					const { keyType, secret, algorithm, privateKey } = (await this.getCredentials(
-						'jwtAuth',
-					)) as {
+					const { keyType, secret, algorithm, privateKey } = await this.getCredentials<{
 						keyType: 'passphrase' | 'pemKey';
 						privateKey: string;
 						secret: string;
 						algorithm: jwt.Algorithm;
-					};
+					}>('jwtAuth');
 
 					let secretOrPrivateKey;
 

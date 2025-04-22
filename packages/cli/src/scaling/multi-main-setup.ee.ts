@@ -1,10 +1,9 @@
 import { GlobalConfig } from '@n8n/config';
-import { InstanceSettings } from 'n8n-core';
-import { Service } from 'typedi';
+import { Service } from '@n8n/di';
+import { InstanceSettings, Logger } from 'n8n-core';
 
 import config from '@/config';
 import { Time } from '@/constants';
-import { Logger } from '@/logging/logger.service';
 import { Publisher } from '@/scaling/pubsub/publisher.service';
 import { RedisClientService } from '@/services/redis-client.service';
 import { TypedEmitter } from '@/typed-emitter';
@@ -109,14 +108,16 @@ export class MultiMainSetup extends TypedEmitter<MultiMainEvents> {
 		const { hostId } = this.instanceSettings;
 
 		// this can only succeed if leadership is currently vacant
-		const keySetSuccessfully = await this.publisher.setIfNotExists(this.leaderKey, hostId);
+		const keySetSuccessfully = await this.publisher.setIfNotExists(
+			this.leaderKey,
+			hostId,
+			this.leaderKeyTtl,
+		);
 
 		if (keySetSuccessfully) {
 			this.logger.debug(`[Instance ID ${hostId}] Leader is now this instance`);
 
 			this.instanceSettings.markAsLeader();
-
-			await this.publisher.setExpiration(this.leaderKey, this.leaderKeyTtl);
 
 			this.emit('leader-takeover');
 		} else {

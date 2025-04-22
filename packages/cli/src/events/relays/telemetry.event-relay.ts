@@ -1,19 +1,21 @@
 import { GlobalConfig } from '@n8n/config';
+import { Service } from '@n8n/di';
 import { snakeCase } from 'change-case';
+import { BinaryDataConfig, InstanceSettings } from 'n8n-core';
 import type { ExecutionStatus, INodesGraphResult, ITelemetryTrackProperties } from 'n8n-workflow';
 import { TelemetryHelpers } from 'n8n-workflow';
 import os from 'node:os';
 import { get as pslGet } from 'psl';
-import { Service } from 'typedi';
 
 import config from '@/config';
 import { N8N_VERSION } from '@/constants';
+import { CredentialsRepository } from '@/databases/repositories/credentials.repository';
 import { ProjectRelationRepository } from '@/databases/repositories/project-relation.repository';
 import { SharedWorkflowRepository } from '@/databases/repositories/shared-workflow.repository';
 import { WorkflowRepository } from '@/databases/repositories/workflow.repository';
 import { EventService } from '@/events/event.service';
 import type { RelayEventMap } from '@/events/maps/relay.event-map';
-import { determineFinalExecutionStatus } from '@/execution-lifecycle-hooks/shared/shared-hook-functions';
+import { determineFinalExecutionStatus } from '@/execution-lifecycle/shared/shared-hook-functions';
 import type { IExecutionTrackProperties } from '@/interfaces';
 import { License } from '@/license';
 import { NodeTypes } from '@/node-types';
@@ -28,10 +30,13 @@ export class TelemetryEventRelay extends EventRelay {
 		private readonly telemetry: Telemetry,
 		private readonly license: License,
 		private readonly globalConfig: GlobalConfig,
+		private readonly instanceSettings: InstanceSettings,
+		private readonly binaryDataConfig: BinaryDataConfig,
 		private readonly workflowRepository: WorkflowRepository,
 		private readonly nodeTypes: NodeTypes,
 		private readonly sharedWorkflowRepository: SharedWorkflowRepository,
 		private readonly projectRelationRepository: ProjectRelationRepository,
+		private readonly credentialsRepository: CredentialsRepository,
 	) {
 		super(eventService);
 	}
@@ -166,11 +171,13 @@ export class TelemetryEventRelay extends EventRelay {
 	}
 
 	private sourceControlUserStartedPullUi({
+		userId,
 		workflowUpdates,
 		workflowConflicts,
 		credConflicts,
 	}: RelayEventMap['source-control-user-started-pull-ui']) {
 		this.telemetry.track('User started pull via UI', {
+			user_id: userId,
 			workflow_updates: workflowUpdates,
 			workflow_conflicts: workflowConflicts,
 			cred_conflicts: credConflicts,
@@ -178,9 +185,11 @@ export class TelemetryEventRelay extends EventRelay {
 	}
 
 	private sourceControlUserFinishedPullUi({
+		userId,
 		workflowUpdates,
 	}: RelayEventMap['source-control-user-finished-pull-ui']) {
 		this.telemetry.track('User finished pull via UI', {
+			user_id: userId,
 			workflow_updates: workflowUpdates,
 		});
 	}
@@ -196,6 +205,7 @@ export class TelemetryEventRelay extends EventRelay {
 	}
 
 	private sourceControlUserStartedPushUi({
+		userId,
 		workflowsEligible,
 		workflowsEligibleWithConflicts,
 		credsEligible,
@@ -203,6 +213,7 @@ export class TelemetryEventRelay extends EventRelay {
 		variablesEligible,
 	}: RelayEventMap['source-control-user-started-push-ui']) {
 		this.telemetry.track('User started push via UI', {
+			user_id: userId,
 			workflows_eligible: workflowsEligible,
 			workflows_eligible_with_conflicts: workflowsEligibleWithConflicts,
 			creds_eligible: credsEligible,
@@ -212,12 +223,14 @@ export class TelemetryEventRelay extends EventRelay {
 	}
 
 	private sourceControlUserFinishedPushUi({
+		userId,
 		workflowsEligible,
 		workflowsPushed,
 		credsPushed,
 		variablesPushed,
 	}: RelayEventMap['source-control-user-finished-push-ui']) {
 		this.telemetry.track('User finished push via UI', {
+			user_id: userId,
 			workflows_eligible: workflowsEligible,
 			workflows_pushed: workflowsPushed,
 			creds_pushed: credsPushed,
@@ -596,11 +609,6 @@ export class TelemetryEventRelay extends EventRelay {
 			return;
 		}
 
-		if (runData?.status === 'waiting') {
-			// No need to send telemetry or logs when the workflow hasn't finished yet.
-			return;
-		}
-
 		const telemetryProperties: IExecutionTrackProperties = {
 			workflow_id: workflow.id,
 			is_manual: false,
@@ -630,6 +638,10 @@ export class TelemetryEventRelay extends EventRelay {
 			let nodeGraphResult: INodesGraphResult | null = null;
 
 			if (!telemetryProperties.success && runData?.data.resultData.error) {
+				if (TelemetryHelpers.userInInstanceRanOutOfFreeAiCredits(runData)) {
+					this.telemetry.track('User ran out of free AI credits');
+				}
+
 				telemetryProperties.error_message = runData?.data.resultData.error.message;
 				let errorNodeName =
 					'node' in runData?.data.resultData.error
@@ -691,6 +703,9 @@ export class TelemetryEventRelay extends EventRelay {
 					error_node_id: telemetryProperties.error_node_id as string,
 					webhook_domain: null,
 					sharing_role: userRole,
+					credential_type: null,
+					is_managed: false,
+					...TelemetryHelpers.resolveAIMetrics(workflow.nodes, this.nodeTypes),
 				};
 
 				if (!manualExecEventProperties.node_graph_string) {
@@ -701,7 +716,18 @@ export class TelemetryEventRelay extends EventRelay {
 				}
 
 				if (runData.data.startData?.destinationNode) {
-					const telemetryPayload = {
+					const credentialsData = TelemetryHelpers.extractLastExecutedNodeCredentialData(runData);
+					if (credentialsData) {
+						manualExecEventProperties.credential_type = credentialsData.credentialType;
+						const credential = await this.credentialsRepository.findOneBy({
+							id: credentialsData.credentialId,
+						});
+						if (credential) {
+							manualExecEventProperties.is_managed = credential.isManaged;
+						}
+					}
+
+					const telemetryPayload: ITelemetryTrackProperties = {
 						...manualExecEventProperties,
 						node_type: TelemetryHelpers.getNodeTypeForName(
 							workflow,
@@ -736,10 +762,9 @@ export class TelemetryEventRelay extends EventRelay {
 
 	private async serverStarted() {
 		const cpus = os.cpus();
-		const binaryDataConfig = config.getEnv('binaryDataManager');
 
-		const isS3Selected = config.getEnv('binaryDataManager.mode') === 's3';
-		const isS3Available = config.getEnv('binaryDataManager.availableModes').includes('s3');
+		const isS3Selected = this.binaryDataConfig.mode === 's3';
+		const isS3Available = this.binaryDataConfig.availableModes.includes('s3');
 		const isS3Licensed = this.license.isBinaryDataS3Licensed();
 		const authenticationMethod = config.getEnv('userManagement.authenticationMethod');
 
@@ -760,6 +785,7 @@ export class TelemetryEventRelay extends EventRelay {
 					model: cpus[0].model,
 					speed: cpus[0].speed,
 				},
+				is_docker: this.instanceSettings.isDocker,
 			},
 			execution_variables: {
 				executions_mode: config.getEnv('executions.mode'),
@@ -775,7 +801,7 @@ export class TelemetryEventRelay extends EventRelay {
 				executions_data_max_age: this.globalConfig.executions.pruneDataMaxAge,
 			},
 			n8n_deployment_type: config.getEnv('deployment.type'),
-			n8n_binary_data_mode: binaryDataConfig.mode,
+			n8n_binary_data_mode: this.binaryDataConfig.mode,
 			smtp_set_up: this.globalConfig.userManagement.emails.mode === 'smtp',
 			ldap_allowed: authenticationMethod === 'ldap',
 			saml_enabled: authenticationMethod === 'saml',
